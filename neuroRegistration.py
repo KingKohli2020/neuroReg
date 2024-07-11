@@ -9,8 +9,6 @@ from slicer import vtkMRMLScalarVolumeNode
 import argparse
 
 from SlicerDevelopmentToolboxUtils.mixins import ModuleLogicMixin, ModuleWidgetMixin
-from SliceTrackerUtils.sessionData import *
-from SliceTrackerUtils.constants import SliceTrackerConstants
 from SlicerDevelopmentToolboxUtils.decorators import onReturnProcessEvents
 #
 # neuroRegistration
