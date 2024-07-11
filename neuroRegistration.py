@@ -3,11 +3,15 @@ import os
 import sys
 import slicer
 from typing import Annotated  # Import Annotated from typing module
-from slicer.ScriptedLoadableModule import ScriptedLoadableModule, ScriptedLoadableModuleLogic
+from slicer.ScriptedLoadableModule import *
 from slicer.parameterNodeWrapper import parameterNodeWrapper, WithinRange
 from slicer import vtkMRMLScalarVolumeNode
 import argparse
 
+from SlicerDevelopmentToolboxUtils.mixins import ModuleLogicMixin, ModuleWidgetMixin
+from SliceTrackerUtils.sessionData import *
+from SliceTrackerUtils.constants import SliceTrackerConstants
+from SlicerDevelopmentToolboxUtils.decorators import onReturnProcessEvents
 #
 # neuroRegistration
 #
@@ -300,20 +304,16 @@ class RegistrationResult:
             self.bSpline = None
 
 def main(args):
-    parser = argparse.ArgumentParser(description="Run neuroRegistration")
-    parser.add_argument('--fixedVolume', required=True, help='Path to the fixed volume')
-    parser.add_argument('--movingVolume', required=True, help='Path to the moving volume')
-    parser.add_argument('--fixedLabel', required=True, help='Path to the fixed label')
-    parser.add_argument('--movingLabel', required=True, help='Path to the moving label')
-    parser.add_argument('--initialTransform', required=False, help='Path to the initial transform (optional)')
-    parser.add_argument('--targets', required=False, help='Path to the targets (optional)')
-    args = parser.parse_args(args)
-
     # Load the volumes and labels into Slicer
-    fixedVolume = slicer.util.loadVolume(args.fixedVolume)
-    movingVolume = slicer.util.loadVolume(args.movingVolume)
-    fixedLabel = slicer.util.loadLabelVolume(args.fixedLabel)
-    movingLabel = slicer.util.loadLabelVolume(args.movingLabel)
+    # fixedVolume = slicer.util.getNode(r'C:\Users\pratt\OneDrive\Documents\Sample Images for Sequence Registration\manifest-1720549499368\CPTAC-CM\C3L-00629\04-23-2000-NA-MR BRAIN WOW CONTRAST-18837\203.000000-isoReg - DWI b 1000-03763\1-01.dcm')
+    # movingVolume = slicer.util.getNode(r'C:\Users\pratt\Downloads\spl-brain-atlas-master\spl-brain-atlas-master\slicer\volumes\imaging\A1_grayT2.nrrd')
+    # fixedLabel = slicer.util.getNode(r'C:\Users\pratt\Downloads\spl-brain-atlas-master\spl-brain-atlas-master\slicer\volumes\labels\hncma-atlas.nrrd')
+    # movingLabel = slicer.util.getNode(r'C:\Users\pratt\Downloads\spl-brain-atlas-master\spl-brain-atlas-master\slicer\volumes\labels\hncma-atlas.nrrd')
+
+    fixedVolume = slicer.util.getNode(pattern='203: isoReg - DWI b 1000')
+    movingVolume = slicer.util.getNode(pattern='A1_grayT2')
+    fixedLabel = slicer.util.getNode(pattern='hncma-atlas-lut')
+    movingLabel = slicer.util.getNode(pattern='hncma-atlas-lut')
 
     # Create and configure the parameter node
     parameterNode = slicer.vtkMRMLScriptedModuleNode()
@@ -322,13 +322,6 @@ def main(args):
     parameterNode.SetAttribute('MovingImageNodeID', movingVolume.GetID())
     parameterNode.SetAttribute('FixedLabelNodeID', fixedLabel.GetID())
     parameterNode.SetAttribute('MovingLabelNodeID', movingLabel.GetID())
-
-    if args.initialTransform:
-        initialTransform = slicer.util.loadTransform(args.initialTransform)
-        parameterNode.SetAttribute('InitialTransformNodeID', initialTransform.GetID())
-    if args.targets:
-        targets = slicer.util.loadMarkups(args.targets)
-        parameterNode.SetAttribute('TargetsNodeID', targets.GetID())
 
     # Instantiate and run the logic
     logic = neuroRegistrationLogic()
