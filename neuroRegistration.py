@@ -5,6 +5,39 @@ import vtk
 import slicer
 from DICOMLib import DICOMUtils
 
+def convertVolumeScalarType(volumeNode, targetType='Float'):
+    params = {
+        'InputVolume': volumeNode,
+        'OutputVolume': slicer.mrmlScene.AddNewNodeByClass('vtkMRMLScalarVolumeNode'),
+        'Type': targetType
+    }
+    cliNode = slicer.cli.runSync(slicer.modules.castscalarvolume, None, params)
+    if cliNode.GetStatusString() != 'Completed':
+        logging.error("Cast Scalar Volume failed: " + cliNode.GetStatusString())
+        raise RuntimeError(f"Scalar volume casting failed with status: {cliNode.GetStatusString()}")
+    return params['OutputVolume']
+
+def rescaleVolumeIntensities(volumeNode):
+    if isinstance(volumeNode, str):
+        volumeNode = slicer.util.getNode(volumeNode)
+    
+    if not volumeNode or not volumeNode.GetImageData():
+        raise ValueError("Invalid volume node provided.")
+    
+    import SimpleITK as sitk
+    import sitkUtils
+    
+    sitkVolume = sitkUtils.PullVolumeFromSlicer(volumeNode)
+    rescaler = sitk.RescaleIntensityImageFilter()
+    rescaler.SetOutputMinimum(0)
+    rescaler.SetOutputMaximum(255)
+    normalizedSitkVolume = rescaler.Execute(sitkVolume)
+    sitkUtils.PushVolumeToSlicer(normalizedSitkVolume, volumeNode)
+    return volumeNode
+
+def alignVolumeOrigin(volumeNode, referenceVolumeNode):
+    volumeNode.SetOrigin(referenceVolumeNode.GetOrigin())
+
 def doRigidRegistration(fixedVolume, movingVolume, finalImage, outputTransform):
     paramsRigid = {'fixedVolume': fixedVolume,
                 'movingVolume': movingVolume,
@@ -58,9 +91,7 @@ def main():
     batchReg = input("If you are doing batch registration, press 'y'.")
     fixedVolumes = []
     if batchReg == "y":
-        # Path to the DICOM directory
-        dicomDirectory = r'C:\Users\pratt\OneDrive\Documents\Sample Images for Sequence Registration\manifest-1720549499368\CPTAC-CM\C3L-00629\04-23-2000-NA-MR BRAIN WOW CONTRAST-18837'
-        fixedVolumes = []
+        dicomDirectory = r'C:\Users\pratt\Downloads\raw'
 
         with DICOMUtils.TemporaryDICOMDatabase() as db:
             DICOMUtils.importDicom(dicomDirectory, db)
@@ -68,51 +99,43 @@ def main():
             for patientUID in patientUIDs:
                 fixedVolumes.extend(DICOMUtils.loadPatientByUID(patientUID))
         
-        movingVolume = slicer.util.getNode(pattern='A1_grayT2')
-        
-        # Variables
+        movingVolume = slicer.util.getNode(pattern='A1_grayT1')
         images = len(fixedVolumes)
 
         regType = input("What type of registration do you want to use? Type 'R' for Rigid, 'B' for BSpline, and 'A' for Affine. ")
-        if regType == "R":
-            for x in range(images):
-                # Create output image and transformation for resampling
-                resampledFixedVolume = slicer.mrmlScene.AddNewNodeByClass('vtkMRMLScalarVolumeNode')
-                doBrainResampling(fixedVolumes[x], movingVolume, resampledFixedVolume)
-                
-                # Create output image and transformation for registration
-                outTrans = slicer.mrmlScene.CreateNodeByClass("vtkMRMLTransformNode")
-                slicer.mrmlScene.AddNode(outTrans)
-                outImg = slicer.mrmlScene.CreateNodeByClass("vtkMRMLScalarVolumeNode")
-                slicer.mrmlScene.AddNode(outImg)
-                doRigidRegistration(resampledFixedVolume, movingVolume, outImg, outTrans)
-        elif regType == "A":
-            for x in range(images):
-                # Create output image and transformation for resampling
-                resampledFixedVolume = slicer.mrmlScene.AddNewNodeByClass('vtkMRMLScalarVolumeNode')
-                doBrainResampling(fixedVolumes[x], movingVolume, resampledFixedVolume)
-                
-                # Create output image and transformation for registration
-                outTrans = slicer.mrmlScene.CreateNodeByClass("vtkMRMLTransformNode")
-                slicer.mrmlScene.AddNode(outTrans)
-                outImg = slicer.mrmlScene.CreateNodeByClass("vtkMRMLScalarVolumeNode")
-                slicer.mrmlScene.AddNode(outImg)
-                doAffineRegistration(resampledFixedVolume, movingVolume, outImg, outTrans)
-        elif regType == "B":
-            for x in range(images):
-                # Create output image and transformation for resampling
-                resampledFixedVolume = slicer.mrmlScene.AddNewNodeByClass('vtkMRMLScalarVolumeNode')
-                doBrainResampling(fixedVolumes[x], movingVolume, resampledFixedVolume)
-                
-                # Create output image and transformation for registration
-                bsplineTransform = slicer.mrmlScene.CreateNodeByClass("vtkMRMLTransformNode")
-                slicer.mrmlScene.AddNode(bsplineTransform)
-                finalImage = slicer.mrmlScene.CreateNodeByClass("vtkMRMLScalarVolumeNode")
-                slicer.mrmlScene.AddNode(finalImage)
-                doBSplineRegistration(resampledFixedVolume, movingVolume, finalImage, bsplineTransform)
-        else:
-            print("you dun goofed")
-    else:
+        if regType not in ("R", "A", "B"):
+            print("Invalid registration type.")
+            return
+
+        for x in range(images):
+            fixedVolume = fixedVolumes[x]
+
+            # Ensure fixedVolume is a volume node
+            if isinstance(fixedVolume, str):
+                fixedVolume = slicer.util.getNode(fixedVolume)
+
+            if not isinstance(fixedVolume, slicer.vtkMRMLScalarVolumeNode):
+                print(f"Invalid volume node at index {x}. It is not a vtkMRMLScalarVolumeNode. Skipping this volume.")
+                continue
+
+            fixedVolume = convertVolumeScalarType(fixedVolume)
+            # rescaleVolumeIntensities(fixedVolume)
+            # alignVolumeOrigin(fixedVolume, movingVolume)
+            
+            doBrainResampling(fixedVolume, movingVolume, fixedVolume)
+            
+            outImg = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLScalarVolumeNode", f"{fixedVolume.GetName()}_outputVolume")
+            outTrans = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLTransformNode", f"{fixedVolume.GetName()}_outputTransform")
+
+            if regType == "R":
+                doRigidRegistration(fixedVolume, movingVolume, outImg, outTrans)
+            elif regType == "A":
+                doAffineRegistration(fixedVolume, movingVolume, outImg, outTrans)
+            elif regType == "B":
+                doBSplineRegistration(fixedVolume, movingVolume, outImg, outTrans)
+
+    
+    elif regType == "n":
         fixedVolume = slicer.util.getNode(pattern='701: sT1W_3D_TFE_AX PRE')
         movingVolume = slicer.util.getNode(pattern='A1_grayT2')
         
