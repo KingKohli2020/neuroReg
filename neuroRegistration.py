@@ -5,17 +5,6 @@ import vtk
 import slicer
 from DICOMLib import DICOMUtils
 
-def convertVolumeScalarType(volumeNode, targetType='Float'):
-    params = {
-        'InputVolume': volumeNode,
-        'OutputVolume': slicer.mrmlScene.AddNewNodeByClass('vtkMRMLScalarVolumeNode'),
-        'Type': targetType
-    }
-    cliNode = slicer.cli.runSync(slicer.modules.castscalarvolume, None, params)
-    if cliNode.GetStatusString() != 'Completed':
-        logging.error("Cast Scalar Volume failed: " + cliNode.GetStatusString())
-        raise RuntimeError(f"Scalar volume casting failed with status: {cliNode.GetStatusString()}")
-    return params['OutputVolume']
 
 def rescaleVolumeIntensities(volumeNode):
     if isinstance(volumeNode, str):
@@ -74,6 +63,18 @@ def doAffineRegistration(fixedVolume, movingVolume, finalImage, outputTransform)
     slicer.cli.run(slicer.modules.brainsfit, None, paramsAffine, wait_for_completion=True)
     print("Done Affine Registration")
 
+def convertVolumeScalarType(volumeNode, targetType='Float'):
+    params = {
+        'InputVolume': volumeNode,
+        'OutputVolume': slicer.mrmlScene.AddNewNodeByClass('vtkMRMLScalarVolumeNode'),
+        'Type': targetType
+    }
+    cliNode = slicer.cli.runSync(slicer.modules.castscalarvolume, None, params)
+    if cliNode.GetStatusString() != 'Completed':
+        logging.error("Cast Scalar Volume failed: " + cliNode.GetStatusString())
+        raise RuntimeError(f"Scalar volume casting failed with status: {cliNode.GetStatusString()}")
+    return params['OutputVolume']
+
 def doBrainResampling(inputVolume, referenceVolume, outputVolume, interpolationMode='Linear'):
     paramsBrainResample = {
         'inputVolume': inputVolume,
@@ -81,61 +82,66 @@ def doBrainResampling(inputVolume, referenceVolume, outputVolume, interpolationM
         'outputVolume': outputVolume,
         'interpolationMode': interpolationMode
     }
-    cliNode = slicer.cli.run(slicer.modules.brainsresample, None, paramsBrainResample, wait_for_completion=True)
+    cliNode = slicer.cli.runSync(slicer.modules.brainsresample, None, paramsBrainResample)
     if cliNode.GetStatusString() != 'Completed':
         logging.error("Resample Image (BRAINS) failed: " + cliNode.GetStatusString())
+        raise RuntimeError(f"Resample Image (BRAINS) failed with status: {cliNode.GetStatusString()}")
     else:
         logging.info("Resample Image (BRAINS) completed successfully.")
 
 def main():
+    movingVolumes = []
+
+    regType = input("What type of registration do you want to use? Type 'R' for Rigid, 'B' for BSpline, and 'A' for Affine. ")
+    if regType not in ("R", "A", "B"):
+        print("Invalid registration type.")
+        return
+    
     batchReg = input("If you are doing batch registration, press 'y'.")
-    fixedVolumes = []
     if batchReg == "y":
         dicomDirectory = r'C:\Users\pratt\Downloads\raw'
 
+        fixedVolume = slicer.util.getNode(pattern='A1_grayT1')
+        
         with DICOMUtils.TemporaryDICOMDatabase() as db:
             DICOMUtils.importDicom(dicomDirectory, db)
             patientUIDs = db.patients()
             for patientUID in patientUIDs:
-                fixedVolumes.extend(DICOMUtils.loadPatientByUID(patientUID))
-        
-        movingVolume = slicer.util.getNode(pattern='A1_grayT1')
-        images = len(fixedVolumes)
+                movingVolumes.extend(DICOMUtils.loadPatientByUID(patientUID))
 
-        regType = input("What type of registration do you want to use? Type 'R' for Rigid, 'B' for BSpline, and 'A' for Affine. ")
-        if regType not in ("R", "A", "B"):
-            print("Invalid registration type.")
-            return
+        for x in range(len(movingVolumes)):
+            movingVolume = movingVolumes[x]
 
-        for x in range(images):
-            fixedVolume = fixedVolumes[x]
+            # Ensure movingVolume is a volume node
+            if isinstance(movingVolume, str):
+                try:
+                    movingVolume = slicer.util.getNode(movingVolume)
+                except:
+                    continue
 
-            # Ensure fixedVolume is a volume node
-            if isinstance(fixedVolume, str):
-                fixedVolume = slicer.util.getNode(fixedVolume)
-
-            if not isinstance(fixedVolume, slicer.vtkMRMLScalarVolumeNode):
+            if not isinstance(movingVolume, slicer.vtkMRMLScalarVolumeNode):
                 print(f"Invalid volume node at index {x}. It is not a vtkMRMLScalarVolumeNode. Skipping this volume.")
                 continue
 
-            fixedVolume = convertVolumeScalarType(fixedVolume)
-            # rescaleVolumeIntensities(fixedVolume)
-            # alignVolumeOrigin(fixedVolume, movingVolume)
+            # Adjust volume scalar type
+            adjmovingVolume = convertVolumeScalarType(movingVolume)      
             
-            doBrainResampling(fixedVolume, movingVolume, fixedVolume)
+            # Resample the adjusted volume
+            doBrainResampling(adjmovingVolume, fixedVolume, adjmovingVolume)
             
-            outImg = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLScalarVolumeNode", f"{fixedVolume.GetName()}_outputVolume")
-            outTrans = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLTransformNode", f"{fixedVolume.GetName()}_outputTransform")
+            # Add output nodes to the scene
+            outImg = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLScalarVolumeNode", f"{movingVolume.GetName()}_outputVolume")
+            outTrans = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLTransformNode", f"{movingVolume.GetName()}_outputTransform")
 
+            # Perform registration based on selected type
             if regType == "R":
-                doRigidRegistration(fixedVolume, movingVolume, outImg, outTrans)
+                doRigidRegistration(fixedVolume, adjmovingVolume, outImg, outTrans)
             elif regType == "A":
-                doAffineRegistration(fixedVolume, movingVolume, outImg, outTrans)
+                doAffineRegistration(fixedVolume, adjmovingVolume, outImg, outTrans)
             elif regType == "B":
-                doBSplineRegistration(fixedVolume, movingVolume, outImg, outTrans)
+                doBSplineRegistration(fixedVolume, adjmovingVolume, outImg, outTrans)
 
-    
-    elif regType == "n":
+    elif batchReg == "n":
         fixedVolume = slicer.util.getNode(pattern='701: sT1W_3D_TFE_AX PRE')
         movingVolume = slicer.util.getNode(pattern='A1_grayT2')
         
@@ -166,7 +172,7 @@ def main():
             slicer.mrmlScene.AddNode(finalImage)
             doBSplineRegistration(resampledFixedVolume, movingVolume, finalImage, bsplineTransform)
         else:
-            print("you dun goofed")
+            print("Invalid registration type")
 
 # Execute the main function with command-line arguments
 if __name__ == "__main__":
