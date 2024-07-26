@@ -3,13 +3,70 @@ import os
 import sys
 import vtk
 import slicer
+import joblib
 import numpy as np
+import pandas as pd
 import SimpleITK as sitk
 import sitkUtils
 from statistics import mean
 from scipy.spatial.distance import dice
 from DICOMLib import DICOMUtils
+from sklearn.preprocessing import LabelEncoder
+from sklearn.model_selection import train_test_split
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.metrics import accuracy_score
 
+
+# data = {
+#     "Quality": ["Good", "Bad", "Bad", "Bad", "Good"],
+#     "Mean": [316.7, 462.5, 293.3, 430.5, 933.2],
+#     "Std Dev": [56.4, 195.2, 30.4, 130.5, 370.1],
+#     "PCC": [0.01916, 0.01095, -0.02534, -0.00042, 0.00070],
+#     "DSC": [0.76985, 0.32232, 0.54778, 0.16228, 0.36639]
+# }
+
+# df = pd.DataFrame(data)
+
+# # Encode the 'Quality' column
+# label_encoder = LabelEncoder()
+# df["Quality"] = label_encoder.fit_transform(df["Quality"])
+
+# # Split the data into features and labels
+# X = df.drop("Quality", axis=1)
+# y = df["Quality"]
+
+# # Split the data into training and testing sets
+# X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+
+# # Initialize and train the model
+# model = RandomForestClassifier(n_estimators=100, random_state=42)
+# model.fit(X_train, y_train)
+
+# # Predict on the test set
+# y_pred = model.predict(X_test)
+
+# # Evaluate the model
+# accuracy = accuracy_score(y_test, y_pred)
+# print(f"Accuracy: {accuracy:.2f}")
+
+
+# joblib.dump(model, "quality_model.pkl")
+# joblib.dump(label_encoder, "label_encoder.pkl")
+
+model = joblib.load("quality_model.pkl")
+label_encoder = joblib.load("label_encoder.pkl")
+
+def classify_registration_with_model(mean, std_dev, pcc, dsc, model, label_encoder):
+    new_data = pd.DataFrame({
+        "Mean": [mean],
+        "Std Dev": [std_dev],
+        "PCC": [pcc],
+        "DSC": [dsc]
+    })
+
+    prediction = model.predict(new_data)
+    predicted_label = label_encoder.inverse_transform(prediction)
+    return predicted_label[0]
 
 def rescaleVolumeIntensities(volumeNode):
     if isinstance(volumeNode, str):
@@ -144,7 +201,10 @@ def doPCC(outImg, fixedVolume):
     normalizedAtlIntensities = (atlIntensities - atlMean) / atlStdDev
 
     pcc = np.mean(normalizedRegIntensities * normalizedAtlIntensities)
-    print(f"PCC: {pcc}")
+    # print(f"PCC: {pcc}")
+    # print(f"Mean Intensity: {regMean}")
+    # print(f"Intensity Standard Deviation: {regStdDev}")
+    return pcc, regMean, regStdDev
 
 def doMI(fixedVolume, movingVolume, outTrans):
     metric = sitk.ImageRegistrationMethod()
@@ -166,7 +226,8 @@ def doDSC(fixedVolume, movingVolume):
     diceFilter.Execute(fixedBinary, movingBinary)
     dsc = diceFilter.GetDiceCoefficient()
     
-    print(f"Dice Similarity Coefficient: {dsc}")
+    # print(f"Dice Similarity Coefficient: {dsc}")
+    return dsc
 
 def main():
     movingVolumes = []
@@ -234,7 +295,7 @@ def main():
 
     elif batchReg == "n":
         fixedVolume = slicer.util.getNode(pattern='A1_grayT1')
-        movingVolume = slicer.util.getNode(pattern='4: 3D_AX_T1_precontrast')
+        movingVolume = slicer.util.getNode(pattern='4: 3D_AX_T1_precontrast_1')
         
         # Resample fixed volume
         resampledMovingVolume = slicer.mrmlScene.AddNewNodeByClass('vtkMRMLScalarVolumeNode')
@@ -255,9 +316,12 @@ def main():
             print("Invalid registration type")
         
         rescaleVolumeIntensities(fixedVolume)
-        doPCC(outImg, fixedVolume)
+        pcc, avg, std = doPCC(outImg, fixedVolume)[0], doPCC(outImg, fixedVolume)[1], doPCC(outImg, fixedVolume)[2]
         # doMI(fixedVolume, movingVolume, outTrans)
-        doDSC(fixedVolume, outImg)
+        dsc = doDSC(fixedVolume, outImg)
+
+        quality = classify_registration_with_model(avg, std, pcc, dsc, model, label_encoder)
+        print(f"Quality: {quality.upper()}")
         
 # Execute the main function with command-line arguments
 if __name__ == "__main__":
