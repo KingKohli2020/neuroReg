@@ -4,6 +4,7 @@ import sys
 import vtk
 import slicer
 import joblib
+import pydicom
 import numpy as np
 import pandas as pd
 import SimpleITK as sitk
@@ -15,6 +16,7 @@ from sklearn.preprocessing import LabelEncoder
 from sklearn.model_selection import train_test_split
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.metrics import accuracy_score
+from collections import defaultdict
 
 
 # data = {
@@ -229,8 +231,48 @@ def doDSC(fixedVolume, movingVolume):
     # print(f"Dice Similarity Coefficient: {dsc}")
     return dsc
 
+def extract_dicom_metadata(directory_path):
+    metadata = []
+    for root, dirs, files in os.walk(directory_path):
+        for file in files:
+            if file.endswith('.dcm'):
+                file_path = os.path.join(root, file)
+                ds = pydicom.dcmread(file_path)
+                metadata.append({
+                    'file_path': file_path,
+                    'StudyDate': getattr(ds, 'StudyDate', ''),
+                    'Modality': getattr(ds, 'Modality', ''),
+                    'SeriesDescription': getattr(ds, 'SeriesDescription', ''),
+                    'InstanceNumber': getattr(ds, 'InstanceNumber', 0)
+                })
+    return metadata
+
+def group_dicom_files_by_metadata(metadata):
+    groups = defaultdict(list)
+    for item in metadata:
+        key = (item['StudyDate'], item['Modality'], item['SeriesDescription'])
+        groups[key].append(item['file_path'])
+    
+    return groups
+
+def load_grouped_dicoms(groups):
+    loaded_volumes = []
+    for key, file_paths in groups.items():
+        with DICOMUtils.TemporaryDICOMDatabase() as db:
+            DICOMUtils.importDicom(file_paths, db)
+            loaded_nodes = []
+            for patientUID in db.patients():
+                loaded_nodes.extend(DICOMUtils.loadPatientByUID(patientUID))
+            if loaded_nodes:
+                loaded_volumes.extend(loaded_nodes)
+                for node in loaded_nodes:
+                    print(f"Loaded volume: {node.GetName()}")
+    return loaded_volumes
+
 def main():
+    fixedVolume = slicer.util.getNode(pattern='A1_grayT1')
     movingVolumes = []
+    # goodRegistrations = []
 
     regType = input("What type of registration do you want to use? Type 'R' for Rigid, 'B' for BSpline, and 'A' for Affine. ")
     if regType not in ("R", "A", "B"):
@@ -239,16 +281,18 @@ def main():
     
     batchReg = input("If you are doing batch registration, press 'y'.")
     if batchReg == "y":
-        dicomDirectory = r'C:\Users\pratt\Downloads\raw'
-
-        fixedVolume = slicer.util.getNode(pattern='A1_grayT1')
+        dicomDirectory = r"C:\Users\pratt\Downloads\raw"
         
+        # metadata = extract_dicom_metadata(dicomDirectory)
+        # groups = group_dicom_files_by_metadata(metadata)
+        # movingVolumes = load_grouped_dicoms(groups)
+
         with DICOMUtils.TemporaryDICOMDatabase() as db:
             DICOMUtils.importDicom(dicomDirectory, db)
             patientUIDs = db.patients()
             for patientUID in patientUIDs:
                 movingVolumes.extend(DICOMUtils.loadPatientByUID(patientUID))
-
+                
         for x in range(len(movingVolumes)):
             movingVolume = movingVolumes[x]
 
@@ -285,26 +329,28 @@ def main():
                 doBSplineRegistration(fixedVolume, adjmovingVolume, outImg, outTrans)
             
             # conduct registration similarity measures
-            rescaleVolumeIntensities(fixedVolume)
-            doPCC(outImg, fixedVolume)
+            pcc, avg, std = doPCC(outImg, fixedVolume)[0], doPCC(outImg, fixedVolume)[1], doPCC(outImg, fixedVolume)[2]
             # doMI(fixedVolume, movingVolume, outTrans)
-            doDSC(fixedVolume, outImg)
+            dsc = doDSC(fixedVolume, outImg)
+
+            quality = classify_registration_with_model(avg, std, pcc, dsc, model, label_encoder)
+            print(f"Quality: {quality.upper()}")
             print(f"Registration output name: {movingVolume.GetName()}_outputVolume")
             print("▩▩▩▩▩▩▩▩▩▩▩▩▩▩▩▩▩▩▩▩▩▩▩▩▩▩▩▩▩▩▩▩▩▩▩▩▩▩▩▩▩▩▩▩▩▩▩▩▩▩")
             print()
 
+            # if quality.upper() == "GOOD":
+            #     goodRegistrations.append(outImg)
+
     elif batchReg == "n":
-        fixedVolume = slicer.util.getNode(pattern='A1_grayT1')
-        movingVolume = slicer.util.getNode(pattern='4: 3D_AX_T1_precontrast_1')
+        movingVolume = slicer.util.getNode(pattern='image.0001.dcm')
         
         # Resample fixed volume
         resampledMovingVolume = slicer.mrmlScene.AddNewNodeByClass('vtkMRMLScalarVolumeNode')
         doBrainResampling(movingVolume, fixedVolume, resampledMovingVolume)
 
-        outTrans = slicer.mrmlScene.CreateNodeByClass("vtkMRMLTransformNode")
-        slicer.mrmlScene.AddNode(outTrans)
-        outImg = slicer.mrmlScene.CreateNodeByClass("vtkMRMLScalarVolumeNode")
-        slicer.mrmlScene.AddNode(outImg)
+        outImg = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLScalarVolumeNode", f"{movingVolume.GetName()}_outputVolume")
+        outTrans = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLTransformNode", f"{movingVolume.GetName()}_outputTransform")
 
         if regType == "R":
             doRigidRegistration(fixedVolume, resampledMovingVolume, outImg, outTrans)
@@ -322,6 +368,24 @@ def main():
 
         quality = classify_registration_with_model(avg, std, pcc, dsc, model, label_encoder)
         print(f"Quality: {quality.upper()}")
+
+        # if quality.upper() == "GOOD":
+        #         goodRegistrations.append(outImg)
+    
+    # Save "GOOD" registrations to a file
+    # if goodRegistrations:
+    #     output_directory = r"C:\Users\pratt\Downloads\goodRegistrations"
+    #     if not os.path.exists(output_directory):
+    #         os.makedirs(output_directory)
+        
+    #     for i, volumeNode in enumerate(goodRegistrations):
+    #         output_path = os.path.join(output_directory, outImg.GetName())  # Specify the file extension
+    #         success = slicer.util.saveNode(volumeNode, output_path)
+    #         if success:
+    #             print(f"Saved {volumeNode.GetName()} to {output_path}")
+    #         else:
+    #             print(f"Failed to save {volumeNode.GetName()} to {output_path}")
+
         
 # Execute the main function with command-line arguments
 if __name__ == "__main__":
